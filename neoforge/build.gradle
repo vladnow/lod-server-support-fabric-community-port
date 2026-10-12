@@ -1,0 +1,409 @@
+plugins {
+    id 'java'
+    id 'net.neoforged.moddev' version '2.0.144'
+    id 'com.gradleup.shadow' version '9.4.2'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = 'lod-server-support-neoforge'
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+
+// CI naming parity with the fabric module (release.yml feeds mod_version from the tag).
+def ciArchiveVersion = providers.environmentVariable('CI').map { it == 'true' }.getOrElse(false)
+        ? "${project.mod_version}+${project.minecraft_version}" : ''
+tasks.withType(AbstractArchiveTask).configureEach {
+    archiveVersion = ciArchiveVersion
+}
+
+repositories {
+    mavenCentral()
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = "Modrinth"
+                url = "https://api.modrinth.com/maven"
+            }
+        }
+        filter {
+            includeGroup "maven.modrinth"
+        }
+    }
+}
+
+configurations {
+    // SodiumNeoGoldenParityTest's input: the REAL sodium-neoforge artifact for the
+    // line's pinned Sodium version — the compile-only net.caffeinemc stubs must stay
+    // a descriptor subset of it (the fabric module gets this pin for free from its
+    // modCompileOnly real jar; the stubs need an explicit golden).
+    sodiumNeoGolden {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+}
+
+// The gametest smoke subset (plan §5.2) lives in its own source set — like the
+// fabric module's, it exists only for the dev gametest run and never ships
+// (shadowJar packs sourceSets.main alone).
+sourceSets {
+    gametest {
+        // src/gametest/{java,resources} are this source set's DEFAULT dirs — do not
+        // redeclare them (a second srcDir of the same path duplicates every resource).
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+neoForge {
+    version = project.neoforge_version
+
+    // The fabric accesswidener's 2-line PalettedContainer widening, AT dialect.
+    accessTransformers = project.files('src/main/resources/META-INF/accesstransformer.cfg')
+
+    addModdingDependenciesTo(sourceSets.gametest)
+
+    mods {
+        lss {
+            sourceSet sourceSets.main
+        }
+        lsstest {
+            sourceSet sourceSets.gametest
+        }
+    }
+
+    runs {
+        server {
+            server()
+            programArgument '--nogui'
+            // The gametest companion mod must not join plain server runs.
+            loadedMods = [mods.lss]
+        }
+        // N-3 client smokes: `-Plss.smoke.join=<host:port>` quick-plays into a server;
+        // `-Plss.smoke.consumer=true` arms the lsstest companion's logging LSSApi
+        // consumer (the plan §0.1 executable gate). Without the properties this is a
+        // plain dev client to the main menu.
+        client {
+            client()
+            if (findProperty('lss.smoke.join') != null) {
+                programArguments.addAll('--quickPlayMultiplayer', findProperty('lss.smoke.join').toString())
+            }
+            systemProperty 'lss.smoke.consumer', (findProperty('lss.smoke.consumer') ?: 'false').toString()
+        }
+        gameTestServer {
+            type = "gameTestServer"
+            // Filter to OUR tests: the 26.2 TEST_INSTANCE registry also carries every
+            // vanilla datapack test; unfiltered, the run executes hundreds of them.
+            programArguments.addAll('--tests', 'lsstest:*')
+            // GameTestServer is not a DedicatedServer — the same activation gate the
+            // fabric gametest JVMs open (see fabric/build.gradle).
+            systemProperty 'lss.test.integratedServer', 'true'
+        }
+    }
+}
+
+// Stage N (neoforge-support-plan.md §1.1): the xplat shared source set — the same
+// loader-neutral sources the fabric module compiles. THIS compile is the enforcement
+// of xplat's loader purity and of the same-FQN twin contract.
+sourceSets {
+    main {
+        java {
+            srcDir '../xplat/src/main/java'
+        }
+    }
+}
+
+// Common is shaded. SQLite is an opaque private resource inside common, never
+// an FML module. zstd-jni stays stock jarJar to preserve issue #275/XMMP dedupe.
+configurations {
+    shade
+    // Resolution-only carrier for the nested jarJar libraries (stock bytes; no
+    // transitives — the zstd-jni POM has none at runtime).
+    jarJarStore {
+        transitive = false
+    }
+}
+
+configurations.all {
+    resolutionStrategy {
+        // common declares slf4j 2.0.18; MC 26.2's dependency graph STRICTLY pins
+        // 2.0.17. Force MC's version (API-compatible) — the runtime provider is the
+        // game's own slf4j anyway (same posture as the fabric/paper modules).
+        force 'org.slf4j:slf4j-api:2.0.17'
+    }
+}
+
+dependencies {
+    // the -fabric artifact id swapped for -neoforge: same version, the loader variant
+    sodiumNeoGolden "maven.modrinth:sodium:${project.sodium_version.replace('-fabric', '-neoforge')}"
+    implementation project(':common')
+    shade project(':common')
+    implementation 'com.github.luben:zstd-jni:1.5.7-3'
+    // zstd-jni rides NESTED too (issue #275 — the XMMP clash); the version must
+    // match paper/build.gradle + fabric's slimStoreDepJars (the wire codec pair).
+    jarJarStore 'com.github.luben:zstd-jni:1.5.7-3'
+
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+
+    gametestImplementation project(':common')
+}
+
+processResources {
+    // R2-6: the toml's loader floor derives from neoforge_version (first two
+    // components) — one gradle.properties edit retargets compile AND descriptor.
+    def neoforgeFloor = project.neoforge_version.tokenize('.').take(2).join('.')
+    def props = [mod_version    : project.mod_version,
+                 minecraft_version: project.minecraft_version,
+                 neoforge_version : project.neoforge_version,
+                 neoforge_floor  : neoforgeFloor]
+    inputs.properties props
+    filesMatching('META-INF/neoforge.mods.toml') {
+        expand props
+    }
+    // The mods-screen icon (logoFile in the TOML): derived from the fabric module's
+    // copy so git keeps a single source — the fabric/neoforge mod lists match.
+    from(rootProject.file('fabric/src/main/resources/assets/lss/icon.png')) {
+        into 'assets/lss'
+    }
+    // The options-page lang keys (sodium-options-page-generations-plan.md §3): the legacy
+    // Sodium page renders on NeoForge too (the 0.6.13 Voxy-fork client path), so the
+    // NeoForge jar needs the same lang files — derived from the fabric tree like the icon.
+    from(rootProject.file('fabric/src/main/resources/assets/lss/lang')) {
+        into 'assets/lss/lang'
+    }
+}
+
+// Native strip roots — NO flat native keep rows on this module: zstd rides
+// jarJar and SQLite lives inside the private opaque capsule, so a
+// flat native under any of these roots is a shade regression, and stripping it
+// makes the regression louder (release_check's flat-entry rules are the gate —
+// flat org/sqlite/** and flat com/github/luben/** are both forbidden there).
+def storeNativeRoots = ['org/sqlite/native/', 'linux/', 'win/', 'darwin/', 'freebsd/', 'aix/']
+def storeNativeStrip = { el ->
+    def p = el.relativePath.pathString
+    storeNativeRoots.any { p.startsWith(it) }
+}
+
+// The zstd library's jarJar descriptor (retained from issue #275): generated from
+// the RESOLVED artifacts so a version bump cannot desync it. Range
+// [<version>,<major+1>.0.0.0) — a future-major copy nested by another mod then
+// fails as a hard jarjar version conflict at boot instead of silently winning
+// selection under our compiled-against API. This is LSS's OWN task — MDG also
+// registers an (inert, jar-task-wired) :jarJar task whose output dir
+// build/generated/jarJar it recursively DELETES each run; ours must not live
+// there (case-insensitive filesystems collapse the two), hence lss-jarjar.
+def generateJarJarMetadata = tasks.register('generateJarJarMetadata') {
+    group = 'build'
+    description = 'Generates the jarJar metadata.json for the nested stock libraries (zstd-jni).'
+    def cfg = configurations.jarJarStore
+    def resolved = cfg.incoming.artifacts.resolvedArtifacts
+    def outFile = layout.buildDirectory.file('generated/lss-jarjar/metadata.json')
+    inputs.files(cfg)
+    outputs.file(outFile)
+    doLast {
+        def artifacts = resolved.get()
+        if (artifacts.isEmpty()) {
+            throw new GradleException("jarJarStore resolved no artifacts — nothing to nest")
+        }
+        def entries = artifacts.collect { art ->
+            def id = art.variant.owner
+            if (!(id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier)) {
+                throw new GradleException("jarJarStore resolved a non-module artifact " +
+                        "'${art.file.name}' — every nested library must be a Maven module")
+            }
+            def expected = "${id.module}-${id.version}.jar".toString()
+            if (art.file.name != expected) {
+                // The metadata path must equal the entry shadowJar copies from the
+                // configuration (artifact file name) — a classifier or renamed
+                // artifact would nest a jar the descriptor cannot address.
+                throw new GradleException("jarJarStore artifact '${art.file.name}' is not " +
+                        "named '${expected}' — the jarJar path would not match the nested entry")
+            }
+            def major = id.version.tokenize('.')[0]
+            if (!major.isInteger()) {
+                throw new GradleException("jarJarStore artifact ${id.module}:${id.version} has a " +
+                        "non-numeric leading version component — the [v,major+1.0.0.0) range " +
+                        "cannot be derived")
+            }
+            def nextMajor = (major as int) + 1
+            [group: id.group, artifact: id.module, version: id.version,
+             range: "[${id.version},${nextMajor}.0.0.0)", path: "META-INF/jarjar/${art.file.name}"]
+        }.sort { it.artifact }
+        def jars = entries.collect { e -> """\
+    {
+      "identifier": {
+        "group": "${e.group}",
+        "artifact": "${e.artifact}"
+      },
+      "version": {
+        "range": "${e.range}",
+        "artifactVersion": "${e.version}"
+      },
+      "path": "${e.path}",
+      "isObfuscated": false
+    }""" }.join(',\n')
+        outFile.get().asFile.text = "{\n  \"jars\": [\n${jars}\n  ]\n}\n"
+    }
+}
+
+shadowJar {
+    configurations = [project.configurations.shade]
+    archiveClassifier = ''
+    mergeServiceFiles()
+    // zstd-jni rides NESTED as a stock jarJar library (module-dedupe
+    // against other mods nesting them) — see the packaging comment at the
+    // configurations block.
+    from(project.configurations.jarJarStore) { into 'META-INF/jarjar' }
+    from(generateJarJarMetadata) { into 'META-INF/jarjar' }
+    // Dev-only packages never ship (release_check pins this on every jar family).
+    exclude 'dev/vox/lss/benchmark/**'
+    // The Sodium 0.8 config-API COMPILE-ONLY STUBS (LSSConfigMenu's javadoc):
+    // shipping them would collide with Sodium's own module at FML resolution.
+    // vssJar repackages this jar byte-preserving, so the exclude covers it too;
+    // release_check pins the absence.
+    exclude 'net/caffeinemc/**'
+    // MC's game layer bundles slf4j (26.2 strictly pins 2.0.17) — shipping common's
+    // transitive copy is dead weight at best, a provider-binding hazard at worst
+    // (N-2 review; the paper shadowJar's exact excludes).
+    exclude 'org/slf4j/**'
+    exclude 'META-INF/maven/org.slf4j/**'
+    exclude storeNativeStrip
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute (they ride
+    // inside the nested stock jar now, which carries no license file of its own).
+    from(rootProject.file("LICENSE")) {
+        rename { "${it}_lod-server-support-neoforge" }
+    }
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
+}
+
+// Shadow-only module: the plain jar would sit in build/libs where CI's
+// lod-server-support-neoforge-*.jar globs (release assets, release_check) would
+// match it — disable it outright (dev runs use the classes dirs, not the jar).
+jar {
+    enabled = false
+}
+
+build.dependsOn shadowJar
+
+test {
+    useJUnitPlatform()
+    // The golden resolves LENIENT at execution (the fabric test-block discipline):
+    // offline boxes yield nothing and the parity test skips with an assumption; under
+    // CI=true it FAILS instead — a mistyped coordinate must not void the golden arm.
+    def neoGolden = configurations.sodiumNeoGolden.incoming.artifactView { lenient = true }.files
+    inputs.property "sodium_version", project.sodium_version
+    inputs.files(neoGolden).optional()
+    doFirst {
+        systemProperty 'lss.sodiumNeoGoldenJar', neoGolden.find { it.name.endsWith('.jar') }?.absolutePath ?: ''
+        systemProperty 'lss.sodiumNeoGoldenExpected', 'true'
+    }
+}
+
+// ---- Voxy Server Side (VSS) branded variant (N-4; plan §0.5) --------------------------
+// The fabric vssJar's TOML sibling: a byte-preserving repackage of the shadowJar that
+// rewrites ONLY display surfaces — neoforge.mods.toml branding fields + the
+// lss-brand.properties display values. Mod id `lss`, packages, channels and every class
+// byte are untouched, so the VSS jar stays wire-identical to the LSS jar
+// (release_check's check_wire_identity_neoforge pins a sha256 digest over every class
+// entry's bytes, and check_vss_pair_neoforge pins the TOML rewrite line-for-line).
+// XANTHA publishes manually via the root `vssJars` aggregate; release.yml never touches VSS.
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+
+tasks.register('vssJar') {
+    description = 'Repackages the LSS NeoForge jar under the Voxy Server Side branding.'
+    dependsOn 'shadowJar'
+    def srcJar = tasks.named('shadowJar').flatMap { it.archiveFile }
+    def iconFile = rootProject.file('branding/vss/icon.png')
+    def outName = providers.environmentVariable('CI').map { it == 'true' }.getOrElse(false)
+            ? "voxy-server-side-neoforge-${project.mod_version}+${project.minecraft_version}.jar"
+            : 'voxy-server-side-neoforge.jar'
+    def outFile = layout.buildDirectory.file("libs/${outName}")
+    inputs.file(srcJar)
+    inputs.file(iconFile)
+    outputs.file(outFile)
+    doLast {
+        def src = srcJar.get().asFile
+        def out = outFile.get().asFile
+        out.parentFile.mkdirs()
+        def zf = new ZipFile(src)
+        try {
+            new ZipOutputStream(new FileOutputStream(out)).withCloseable { zos ->
+                def entries = zf.entries()
+                while (entries.hasMoreElements()) {
+                    def e = entries.nextElement()
+                    if (e.name == 'META-INF/neoforge.mods.toml') {
+                        // Line-based TOML rewrite (the plugin.yml precedent): branding
+                        // fields only; modId + dependency blocks untouched.
+                        def text = zf.getInputStream(e).getText('UTF-8')
+                                .replaceFirst(/(?m)^displayName=.*$/,
+                                        'displayName="Voxy Server Side"')
+                                .replaceFirst(/(?m)^authors=.*$/, 'authors="Xantha, VoX"')
+                                .replaceFirst(/(?m)^logoFile=.*$/,
+                                        'logoFile="assets/lss/icon-vss.png"')
+                                .replaceFirst(/(?m)^issueTrackerURL=.*$/,
+                                        'issueTrackerURL="https://modrinth.com/plugin/voxy-server-side"')
+                                .replaceFirst(/(?m)^description=.*$/,
+                                        "description='''Render distant Voxy LODs on servers. Server-side works with any LSS/VSS client; the client half needs a community Voxy build for NeoForge.'''")
+                        zos.putNextEntry(new ZipEntry(e.name))
+                        zos.write(text.getBytes('UTF-8'))
+                        zos.closeEntry()
+                    } else if (e.name == 'lss-brand.properties') {
+                        def props = 'shortName=VSS\ndisplayName=Voxy Server Side\nclientCommand=vss\nserverCommand=vsslod\n'
+                        zos.putNextEntry(new ZipEntry('lss-brand.properties'))
+                        zos.write(props.getBytes('UTF-8'))
+                        zos.closeEntry()
+                    } else if (e.name.startsWith('assets/lss/lang/') && e.name.endsWith('.json')) {
+                        // Display-string rebrand in EVERY lang file's VALUES only (keys stay
+                        // lss.* — addressed by the untouched mod id) — the fabric vssJar's
+                        // loop, ported when the NeoForge jar gained the lang files for the
+                        // legacy Sodium page (sodium-options-page-generations-plan.md §3;
+                        // release_check's lang-value pin covers this pair too).
+                        def lang = new groovy.json.JsonSlurper().parse(zf.getInputStream(e))
+                        def rebranded = lang.collectEntries { k, v ->
+                            [k, v.toString()
+                                    .replace('LOD Server Support', 'Voxy Server Side')
+                                    // Word-boundary: never corrupt 'LSS' inside a longer
+                                    // token (review-wave V-M2); Java's ASCII \b is CJK-safe
+                                    // for the zh locales.
+                                    .replaceAll(/\bLSS\b/, 'VSS')]
+                        }
+                        byte[] lb = groovy.json.JsonOutput.prettyPrint(
+                                groovy.json.JsonOutput.toJson(rebranded)).getBytes('UTF-8')
+                        zos.putNextEntry(new ZipEntry(e.name))
+                        zos.write(lb)
+                        zos.closeEntry()
+                    } else {
+                        def ne = new ZipEntry(e.name)
+                        ne.method = e.method
+                        if (e.method == ZipEntry.STORED) {
+                            ne.size = e.size
+                            ne.compressedSize = e.compressedSize
+                            ne.crc = e.crc
+                        }
+                        zos.putNextEntry(ne)
+                        zf.getInputStream(e).withCloseable { is -> zos << is }
+                        zos.closeEntry()
+                    }
+                }
+                // The dedicated VSS icon rides as a NEW entry beside the LSS icon
+                // (the rewritten logoFile above points at it) — the fabric vssJar's
+                // exact pattern; nothing else in the jar changes.
+                zos.putNextEntry(new ZipEntry('assets/lss/icon-vss.png'))
+                zos.write(iconFile.bytes)
+                zos.closeEntry()
+            }
+        } finally {
+            zf.close()
+        }
+    }
+}
+
+tasks.named('build') { dependsOn 'vssJar' }

@@ -1,0 +1,162 @@
+package dev.vox.lss.paper;
+
+import dev.vox.lss.common.XrayMaskPolicy.FallbackKind;
+import net.minecraft.SharedConstants;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.world.level.block.Blocks;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Twin of the Fabric {@code XrayMaskManagerTest}: pins the {@link PaperXrayMaskManager}
+ * decision/caching core through the level-free seam (dimension + injected
+ * {@link PaperXrayMaskManager.EngineConfig} — the extracted shape of
+ * {@code paperConfig().anticheat.antiXray}), incl. the empty-hidden-list fallback that is
+ * Paper-specific in the design (§3 Detection).
+ */
+class PaperXrayMaskManagerTest {
+
+    static {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+    }
+
+    private static PaperConfig config(String mode) {
+        var c = new MutablePaperSettings();
+        MutablePaperSettings.set(c, "privacy.xray.mode", mode);
+        return c;
+    }
+
+    private static PaperXrayMaskManager.EngineConfig enabled(int maxY) {
+        return new PaperXrayMaskManager.EngineConfig(true, List.of(Blocks.DIAMOND_ORE, Blocks.GOLD_ORE), maxY);
+    }
+
+    private static final PaperXrayMaskManager.EngineConfig DISABLED =
+            new PaperXrayMaskManager.EngineConfig(false, List.of(), 64);
+
+    @Test
+    void autoWithDisabledWorldIsInactiveAndCachedWithOneEvaluation() {
+        var manager = new PaperXrayMaskManager(config("auto"));
+        var evaluations = new AtomicInteger();
+        assertNull(manager.entryFor("minecraft:overworld", () -> {
+            evaluations.incrementAndGet();
+            return DISABLED;
+        }));
+        assertNull(manager.entryFor("minecraft:overworld", () -> {
+            evaluations.incrementAndGet();
+            return DISABLED;
+        }));
+        assertEquals(1, evaluations.get(), "a dimension evaluates exactly once per manager");
+    }
+
+    @Test
+    void autoWithEnabledWorldAdoptsItsBlocksAndHeight() {
+        var manager = new PaperXrayMaskManager(config("auto"));
+        var entry = manager.entryFor("minecraft:overworld", () -> enabled(48));
+        assertNotNull(entry);
+        assertEquals("paper-config", entry.sourceLabel());
+        assertEquals(48, entry.mask().maxBlockHeight());
+        assertTrue(entry.mask().contains(Blocks.DIAMOND_ORE.defaultBlockState()));
+        assertTrue(entry.mask().contains(Blocks.GOLD_ORE.defaultBlockState()));
+        assertFalse(entry.mask().contains(Blocks.REDSTONE_ORE.defaultBlockState()),
+                "engine adoption must carry exactly the config's blocks, not the LSS defaults");
+    }
+
+    @Test
+    void autoWithEnabledWorldButEmptyHiddenListFallsBackToConfigKeys() {
+        // The Paper-specific fallback rung: enabled + hidden-blocks resolving empty.
+        var manager = new PaperXrayMaskManager(config("auto"));
+        var entry = manager.entryFor("minecraft:overworld",
+                () -> new PaperXrayMaskManager.EngineConfig(true, List.of(), 32));
+        assertNotNull(entry, "an enabled world must mask even when its list resolves empty");
+        assertEquals("config", entry.sourceLabel());
+        assertEquals(64, entry.mask().maxBlockHeight(),
+                "the fallback carries the LSS height, not the engine's");
+    }
+
+    @Test
+    void offIsInactiveEvenWithAnEnabledWorld() {
+        var manager = new PaperXrayMaskManager(config("off"));
+        assertNull(manager.entryFor("minecraft:overworld", () -> enabled(64)));
+    }
+
+    @Test
+    void onMasksDisabledWorldsUsingConfigKeys() {
+        var manager = new PaperXrayMaskManager(config("on"));
+        var entry = manager.entryFor("minecraft:overworld", () -> DISABLED);
+        assertNotNull(entry);
+        assertEquals("config", entry.sourceLabel());
+    }
+
+    @Test
+    void fallbackMaskResolvesOncePerManagerAcrossDimensions() {
+        var manager = new PaperXrayMaskManager(config("on"));
+        var a = manager.entryFor("minecraft:overworld", () -> DISABLED);
+        var b = manager.entryFor("minecraft:the_nether", () -> DISABLED);
+        assertSame(a.mask(), b.mask());
+    }
+
+    @Test
+    void fallbackKindFollowsTheDimensionString() {
+        var manager = new PaperXrayMaskManager(config("on"));
+        assertEquals(FallbackKind.NETHER,
+                manager.entryFor("minecraft:the_nether", () -> DISABLED).kind());
+    }
+
+    @Test
+    void diagLineAggregatesLabelAndCounter() {
+        var manager = new PaperXrayMaskManager(config("auto"));
+        assertEquals("Xray: active=off, masked_sections=0", manager.diagLine());
+        manager.entryFor("minecraft:overworld", () -> enabled(64));
+        manager.countMaskedSection();
+        assertEquals("Xray: active=paper-config, masked_sections=1", manager.diagLine());
+    }
+
+    @Test
+    void staticHolderLifecycleIsOwnerGuarded() {
+        var first = PaperXrayMaskManager.activate(config("on"));
+        assertSame(first, PaperXrayMaskManager.current());
+
+        // A successor replaces the holder; the PREDECESSOR's late retract must be a no-op,
+        // as must a null owner — the test-wired-service shape: its shutdown() runs with a
+        // null xrayMasks field and must not null out a live production manager.
+        var second = PaperXrayMaskManager.activate(config("on"));
+        PaperXrayMaskManager.deactivate(first);
+        assertSame(second, PaperXrayMaskManager.current());
+        PaperXrayMaskManager.deactivate(null);
+        assertSame(second, PaperXrayMaskManager.current());
+
+        PaperXrayMaskManager.deactivate(second);
+        assertNull(PaperXrayMaskManager.current());
+    }
+
+    @Test
+    void adoptionRoundsMaxHeightDownToTheSectionBoundary() {
+        // Paper's engine ctor floors max-block-height to a section boundary ((h >> 4) << 4);
+        // adopting the raw value masked up to 15 blocks the near view shows real.
+        var mgr = new PaperXrayMaskManager(config("auto"));
+        var entry = mgr.entryFor("minecraft:overworld",
+                () -> new PaperXrayMaskManager.EngineConfig(true,
+                        List.of(Blocks.DIAMOND_ORE), 100));
+        assertNotNull(entry);
+        assertEquals(96, entry.mask().maxBlockHeight(),
+                "adopted height must match the engine's section-floored value");
+    }
+
+    @Test
+    void throwingEngineViewFallsBackToConfigKeysNotUnmasked() {
+        // The paperConfig() read binds Paper-INTERNAL config classes; if a future build
+        // reshapes them, the supplier throws. That must degrade like Fabric's UNREADABLE
+        // probe — LSS-config-key masking (fail-safe, masking ON) — never an exception into
+        // the pump tick and never a silently unmasked serve (final compat review 2026-07-27).
+        var manager = new PaperXrayMaskManager(config("auto"));
+        var entry = manager.entryFor("minecraft:overworld",
+                () -> new PaperXrayMaskManager.EngineConfig(true, List.of(), 0));
+        assertNotNull(entry, "unreadable engine must still mask");
+        assertEquals("config", entry.sourceLabel(), "fallback tier is the LSS config keys");
+    }
+}

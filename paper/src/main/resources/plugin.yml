@@ -1,0 +1,68 @@
+name: LodServerSupport
+version: '${version}'
+main: dev.vox.lss.paper.LSSPaperPlugin
+api-version: '${api_version}'
+# DERIVED (R2-5): the value expands from `folia` membership in line.env's
+# LINE_PAPER_LOADERS — the one per-line judgment ("does Folia exist upstream for
+# THIS line?") lives there, beside the other line identity rows a fresh cut must
+# touch anyway. Where true, Folia support is EXPERIMENTAL (single-player soak
+# validated; concurrent multi-region ingress untested) — the flag is a loads-at-all
+# statement, never a claim that SOAK_PLATFORM=folia has passed on this line.
+folia-supported: ${folia_supported}
+# C5 (XVER §7): the Via mismatch guard reflectively reads ViaVersion's API when the
+# plugin is present. softdepend keeps Spigot's classloader from logging the one-time
+# "loaded class ... which is not a depend/softdepend" warning on the first handshake —
+# noise that reads like an LSS bug. No hard dependency: without Via the probe is a
+# silent no-signal. LibsDisguises (issue #282): the far-player privacy ladder reads
+# DisguiseAPI reflectively to hide disguised players — same precedent (load ORDER +
+# classloader visibility, never a hard depend; absent = the rung is skipped).
+softdepend: [ViaVersion, LibsDisguises]
+description: Voxy multiplayer support (unofficial). Enables players with Voxy to see fully rendered terrain out to hundreds of chunks on multiplayer servers without needing to explore the world first.
+author: VoX
+website: https://modrinth.com/plugin/lod-server-support
+commands:
+  lsslod:
+    description: LOD Server Support admin commands
+    usage: /lsslod <stats|diag|diagnostics|store|reload|help>
+    permission: lss.admin
+permissions:
+  lss.admin:
+    description: Access to LSS admin commands
+    default: op
+  # Far players (v0.11.0 E1): server-side privacy lever — holders are never served as
+  # far players regardless of the farPlayers mode (FARP §3.2). BOTH brand spellings are
+  # declared (default false) and the enforcement honors either: Bukkit resolves an
+  # UNDECLARED node to the op default, so a single-brand declaration plus a cross-brand
+  # check would silently hide every op — and declaring both keeps the privacy grant
+  # working across an LSS<->VSS jar swap.
+  lss.farplayers.hidden:
+    description: Players with this permission are never shown as far players
+    default: false
+  vss.farplayers.hidden:
+    description: Players with this permission are never shown as far players (VSS spelling)
+    default: false
+  # Service gate (requireServicePermission, default false): with the config key on, only
+  # holders are served LOD data — a handshake from anyone else is answered with an
+  # enabled=false SessionConfig and no session. BOTH brand spellings are declared for the
+  # reason spelled out on lss.farplayers.hidden above (Bukkit resolves an UNDECLARED node to
+  # the op default, so a single-brand declaration plus a cross-brand check goes silently
+  # wrong, and declaring both keeps grants alive across an LSS<->VSS jar swap).
+  #
+  # `default: true`, NOT op: everyone holds these unless an admin says otherwise, so arming
+  # the gate on its own changes nothing for anybody — the original behavior, preserved. The
+  # gate is a DENY tool: the only thing that takes LOD away is an explicit negative grant in
+  # the permission plugin (e.g. LuckPerms `group default permission set lss.use false`).
+  #
+  # Enforcement requires BOTH spellings, so a negative grant on EITHER one denies — the De
+  # Morgan mirror of the privacy nodes above (grant model: hold EITHER; deny model: lose
+  # EITHER). An OR here would be inert: the spelling the admin did NOT touch still resolves
+  # to its declared `true` and would out-vote the single negative grant.
+  #
+  # That direction is also why losing either declaration is dangerous: an undeclared node
+  # falls back to Bukkit's op default, silently turning "everyone" into "ops only".
+  lss.use:
+    description: Receive LOD data when requireServicePermission is enabled
+    default: true
+  vss.use:
+    description: Receive LOD data when requireServicePermission is enabled (VSS spelling)
+    default: true

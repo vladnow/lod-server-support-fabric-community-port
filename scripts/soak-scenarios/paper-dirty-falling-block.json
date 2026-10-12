@@ -1,0 +1,55 @@
+{
+  "snapshotIntervalSeconds": 5,
+  "joinTimeoutSeconds": 240,
+  "steps": [
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule minecraft:random_tick_speed 0"
+    },
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule minecraft:spawn_mobs false"
+    },
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule minecraft:mob_griefing false"
+    },
+    {
+      "anchor": 1,
+      "at": 3,
+      "cmd": "gamerule minecraft:fire_spread_radius_around_player 0"
+    },
+    {
+      "anchor": 1,
+      "at": 3,
+      "cmd": "gamerule minecraft:advance_time false"
+    },
+    {
+      "anchor": 1,
+      "at": 4,
+      "cmd": "tp @a 0 150 0"
+    },
+    {
+      "anchor": 1,
+      "at": 90,
+      "cmd": "forceload add 304 -16 336 16"
+    },
+    {
+      "anchor": 1,
+      "at": 93,
+      "cmd": "summon minecraft:falling_block 320.5 -50.0 0.5 {BlockState:{Name:\"minecraft:stone\"},Time:1}"
+    },
+    {
+      "anchor": 1,
+      "at": 105,
+      "cmd": "forceload remove 304 -16 336 16"
+    }
+  ],
+  "end": {
+    "anchor": 1,
+    "at": 145
+  }
+}

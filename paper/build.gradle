@@ -1,0 +1,284 @@
+plugins {
+    id 'java'
+    id 'io.papermc.paperweight.userdev' version '2.0.0-beta.21'
+    id 'com.gradleup.shadow' version '9.4.2'
+    // Provides RunServer tasks (paperweight-userdev exposes no runServer task);
+    // used by the soak harness (scripts/soak.sh SOAK_PLATFORM=paper).
+    id 'xyz.jpenilla.run-paper' version '3.0.2'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://repo.papermc.io/repository/maven-public/' }
+}
+
+dependencies {
+    implementation project(':common')
+    // zstd remains unrelocated and native-stripped. Common carries SQLite as
+    // an opaque capsule loaded privately, outside Bukkit's class sharing.
+    implementation 'com.github.luben:zstd-jni:1.5.7-3'
+    paperweight.paperDevBundle('26.2.build.84-stable')
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testImplementation 'org.mockito:mockito-core:5.20.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// Native strip lists — keep in sync with fabric/build.gradle's slimStoreDepJars
+// (linux/win/mac × x64/arm64; SQLite is packaged independently by common).
+def storeNativeKeep = [
+    'linux/amd64/', 'linux/aarch64/', 'win/amd64/', 'win/aarch64/',
+    'darwin/x86_64/', 'darwin/aarch64/',
+]
+def storeNativeRoots = ['linux/', 'win/', 'darwin/', 'freebsd/', 'aix/']
+def storeNativeStrip = { el ->
+    def p = el.relativePath.pathString
+    storeNativeRoots.any { p.startsWith(it) } && !storeNativeKeep.any { p.startsWith(it) }
+}
+
+// The DH-compatibility adapter is client-only. Common's DH codec and its private XZ
+// copy can never run on a server, so Paper/Purpur jars do not carry them (X-7). Only
+// client-only common diagnostics classes still name common/dh types; release_check
+// pins that allowlist and the absence below.
+def dhClientOnly = [
+    'dev/vox/lss/common/dh/**',
+    'dev/vox/lss/internal/xz/**',
+    'META-INF/versions/*/dev/vox/lss/internal/xz/**',
+    'META-INF/licenses/xz-java-0BSD.txt',
+]
+
+test {
+    useJUnitPlatform()
+    // ReleaseWorkflowContractTest reads the workflow YAMLs from the source tree; without
+    // declaring them as inputs, a workflow-only edit leaves :paper:test UP-TO-DATE locally
+    // and the contract never re-checks (same pattern as fabric's gametest-listing inputs).
+    inputs.files(rootProject.file('.github/workflows/release.yml'),
+                 rootProject.file('.github/workflows/build.yml'))
+            .withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
+// R2-5: folia-supported derives from line.env (single per-line source; the same
+// datum release_check.py and PluginYmlContractTest read, so the three cannot drift).
+def lineEnv = [:]
+rootProject.file('.github/line.env').eachLine { l ->
+    def t = l.trim()
+    if (t && !t.startsWith('#') && t.contains('=')) {
+        def i = t.indexOf('=')
+        lineEnv[t.substring(0, i)] = t.substring(i + 1)
+    }
+}
+def foliaSupported = (lineEnv['LINE_PAPER_LOADERS'] ?: '').tokenize().contains('folia')
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "api_version", project.minecraft_version
+    inputs.property "folia_supported", foliaSupported
+    filesMatching("plugin.yml") {
+        // V-1/P3: api-version equals gradle.properties' minecraft_version on every
+        // recorded line — templated so a support cut never edits this resource.
+        expand "version": project.version, "api_version": project.minecraft_version,
+                "folia_supported": foliaSupported
+    }
+}
+
+shadowJar {
+    archiveBaseName = 'lod-server-support-paper'
+    archiveClassifier = ''
+    // CI builds carry the full version in the filename (lod-server-support-paper-0.4.0+26.1.2.jar);
+    // local dev builds keep the stable unversioned name (mirrors fabric/build.gradle).
+    archiveVersion = providers.environmentVariable('CI').map { it == 'true' }.getOrElse(false)
+            ? "${project.mod_version}+${project.minecraft_version}" : ''
+    configurations = [project.configurations.runtimeClasspath]
+    exclude 'org/slf4j/**'
+    exclude 'META-INF/maven/org.slf4j/**'
+    exclude storeNativeStrip
+    exclude dhClientOnly
+
+    // The soak harness is a dev-only tool (-Dlss.soak.scenario); keep it out of release
+    // jars. PaperSoakBridge no-ops when the classes are absent (mirrors fabric/build.gradle's
+    // benchmark exclusion); runSoakServer uses soakShadowJar below, which retains them.
+    exclude 'dev/vox/lss/paper/soak/**'
+
+    from(rootProject.file("LICENSE")) {
+        rename { "${it}_lod-server-support-paper" }
+    }
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute (4-agent
+    // round R4 — the shadow jar's only inherited LICENSE.txt is SLF4J's leftover).
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
+}
+
+// Dev-only variant of the plugin jar that keeps the soak package; consumed exclusively
+// by runSoakServer (scripts/soak.sh SOAK_PLATFORM=paper), which references it via the
+// task output, never by filename. Never published — the base name is deliberately
+// outside the release/CI glob (lod-server-support-paper-*.jar) so a stale soak jar in
+// build/libs can never be attached to a GitHub release or pushed to Modrinth.
+def soakShadowJar = tasks.register('soakShadowJar',
+        com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar) {
+    archiveBaseName = 'lss-paper-soak'
+    archiveClassifier = ''
+    archiveVersion = ''
+    from sourceSets.main.output
+    configurations = [project.configurations.runtimeClasspath]
+    exclude 'org/slf4j/**'
+    exclude 'META-INF/maven/org.slf4j/**'
+    exclude storeNativeStrip
+    exclude dhClientOnly
+    // paperweight stamps 'paperweight-mappings-namespace: mojang' on the jar task; without
+    // it Paper assumes spigot mappings and remaps (= corrupts) this mojang-mapped jar.
+    manifest.inheritFrom(tasks.jar.manifest)
+}
+
+// Soak harness run (scripts/soak.sh) — same gate/property plumbing as fabric's soakServer
+// loom run. The orchestrator stages world/config/server.properties/eula into the run dir
+// before launching; RunServer itself supplies --nogui and disables the watchdog.
+tasks.register('runSoakServer', xyz.jpenilla.runpaper.task.RunServer) {
+    minecraftVersion(project.minecraft_version)
+    runDirectory(file('build/run/soak-server'))
+    pluginJars(soakShadowJar.flatMap { it.archiveFile })
+    systemProperty 'lss.soak.scenario', findProperty('soak.scenario') ?: ''
+    systemProperty 'lss.soak.dirtyTrace', findProperty('soak.dirtyTrace') ?: 'false'
+    // Server-side probe hashes (probe_hashes in server.jsonl — the store byte-parity
+    // gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS, twin of the Fabric
+    // soakServer vmArg.
+    systemProperty 'lss.soak.probes', findProperty('soak.probes') ?: ''
+    maxHeapSize = '2G'
+}
+
+// Folia soak twin (scripts/soak.sh SOAK_PLATFORM=folia). run-paper's opt-in Folia task
+// (named runFolia) downloads folia-<mc>-<build>.jar from the PaperMC downloads service; we
+// point it at the same soakShadowJar + scenario plumbing as runSoakServer. It can double as
+// a manual Folia smoke task — without -Psoak.scenario the driver stays inert (empty
+// property) — but it REUSES the soak staging dir: accept the EULA by hand on a fresh
+// checkout, and expect whatever server.properties/lss-server-config.json/bukkit.yml the
+// last soak scenario staged there (offline-mode superflat + 5s autosave) to apply.
+// pluginsMode INHERIT_NONE is load-bearing: the default PLUGIN_JAR_DETECTION auto-adds the
+// RELEASE shadowJar (soak-excluded) next to soakShadowJar — two same-named plugins, and
+// whichever loads first wins nondeterministically.
+runPaper.folia.pluginsMode = xyz.jpenilla.runpaper.RunPaperExtension.Folia.PluginsMode.INHERIT_NONE
+runPaper.folia.registerTask {
+    minecraftVersion(project.minecraft_version)
+    runDirectory(file('build/run/folia-soak-server'))
+    pluginJars(soakShadowJar.flatMap { it.archiveFile })
+    systemProperty 'lss.soak.scenario', findProperty('soak.scenario') ?: ''
+    // Server-side probe hashes (probe_hashes in server.jsonl — the store byte-parity
+    // gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS, twin of the Fabric
+    // soakServer vmArg.
+    systemProperty 'lss.soak.probes', findProperty('soak.probes') ?: ''
+    maxHeapSize = '2G'
+}
+
+// ---- Voxy Server Side (VSS) branded variant -------------------------------------------
+//
+// Same plugin, second Modrinth project (voxy-server-side). Byte-copies the built release
+// shadowJar and rewrites only USER-FACING + LOCAL surfaces in plugin.yml (the plugin NAME
+// -> VoxyServerSide since 2026-08-13 — XANTHA's release patch; the data folder therefore
+// FORKS to plugins/VoxyServerSide/ — plus description, author, website, the command key
+// lsslod->vsslod, the command/permission descriptions, and the admin node
+// lss.admin->vss.admin; the farplayers privacy nodes are deliberately NOT renamed — both
+// spellings ship in both jars) plus the lss-brand.properties display resource. Every
+// class and the manifest (incl. paperweight's mappings-namespace stamp) are copied
+// verbatim, and `main:` / `api-version:` stay verbatim — the package/class + platform
+// contract; wire compatibility is untouched by any of this (the command name +
+// permission are local, never on the wire). Paper plugins have no embedded icon; the
+// VSS icon lives on the Modrinth page.
+// See docs/planning/ci-dual-publish.md. release_check.py pins the identity lines verbatim
+// and the command/permission/brand rewrites present.
+import java.util.zip.ZipFile
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+def vssPaperVersion = providers.environmentVariable('CI').map { it == 'true' }.getOrElse(false)
+        ? "${project.mod_version}+${project.minecraft_version}" : ''
+def vssPaperJarName = "voxy-server-side-paper" + (vssPaperVersion ? "-${vssPaperVersion}" : "") + ".jar"
+
+tasks.register('vssJar') {
+    description = 'Repackages the LSS Paper jar under the Voxy Server Side branding.'
+    dependsOn tasks.named('shadowJar')
+    def srcJar = tasks.named('shadowJar').flatMap { it.archiveFile }
+    def outFile = layout.buildDirectory.file("libs/${vssPaperJarName}")
+    inputs.file(srcJar)
+    outputs.file(outFile)
+    doLast {
+        def src = srcJar.get().asFile
+        def out = outFile.get().asFile
+        out.parentFile.mkdirs()
+        def zf = new ZipFile(src)
+        try {
+            new ZipOutputStream(new FileOutputStream(out)).withCloseable { zos ->
+                def entries = zf.entries()
+                while (entries.hasMoreElements()) {
+                    def e = entries.nextElement()
+                    if (e.name == 'plugin.yml') {
+                        def text = zf.getInputStream(e).getText('UTF-8')
+                        // Rewrite the plugin NAME + top-level description/author/website AND
+                        // the LOCAL command + permission branding (name rebrand folded from
+                        // XANTHA's v0.10.0 release patch, 2026-08-13 — the VSS plugin now
+                        // presents as VoxyServerSide; its data folder therefore FORKS to
+                        // plugins/VoxyServerSide/, so a Paper-side jar swap starts a fresh
+                        // config folder — the config-filename candidates only adopt within
+                        // one folder. main/version/api-version and folia-supported are
+                        // preserved — identity + wire contract. Command name and permission
+                        // node are LOCAL, never on the wire, so LSS and VSS stay
+                        // wire-compatible. release_check.py's pair check pins this scope.
+                        text = text.replaceFirst(/(?m)^name:.*$/,
+                                'name: VoxyServerSide')
+                        text = text.replaceFirst(/(?m)^description:.*$/,
+                                'description: Render distant Voxy LODs on servers')
+                        text = text.replaceFirst(/(?m)^author:.*$/,
+                                'author: Xantha, VoX')
+                        text = text.replaceFirst(/(?m)^website:.*$/,
+                                'website: https://modrinth.com/plugin/voxy-server-side')
+                        // Command key + usage: lsslod -> vsslod (both occurrences).
+                        text = text.replace('lsslod', 'vsslod')
+                        // Command + permission descriptions and the permission node.
+                        text = text.replace('LOD Server Support admin commands', 'Voxy Server Side admin commands')
+                        text = text.replace('Access to LSS admin commands', 'Access to VSS admin commands')
+                        text = text.replace('lss.admin', 'vss.admin')
+                        // Far players privacy node: NOT renamed since 2026-08-13 — the
+                        // shipped plugin.yml declares BOTH brand spellings (default false)
+                        // and the Java enforcement dual-checks them, because Bukkit
+                        // resolves an UNDECLARED node to the op default (a rename here
+                        // plus the lss.* enforcement literal was silently hiding every
+                        // op on a VSS server). Both jars carry both nodes.
+                        def ne = new ZipEntry('plugin.yml')
+                        zos.putNextEntry(ne)
+                        zos.write(text.getBytes('UTF-8'))
+                        zos.closeEntry()
+                    } else if (e.name == 'lss-brand.properties') {
+                        // Runtime display branding (Brand.java). Display values only — the
+                        // wire surface (channels, protocol, payloads) is untouched.
+                        def props = 'shortName=VSS\ndisplayName=Voxy Server Side\nclientCommand=vss\nserverCommand=vsslod\n'
+                        def ne = new ZipEntry('lss-brand.properties')
+                        zos.putNextEntry(ne)
+                        zos.write(props.getBytes('UTF-8'))
+                        zos.closeEntry()
+                    } else {
+                        def ne = new ZipEntry(e.name)
+                        ne.method = e.method
+                        if (e.method == ZipEntry.STORED) {
+                            ne.size = e.size
+                            ne.compressedSize = e.compressedSize
+                            ne.crc = e.crc
+                        }
+                        zos.putNextEntry(ne)
+                        zf.getInputStream(e).withCloseable { is -> zos << is }
+                        zos.closeEntry()
+                    }
+                }
+            }
+        } finally {
+            zf.close()
+        }
+    }
+}
+
+// shadowJar is what CI/release build; hang the VSS repackage off it so both jars always
+// appear together (build.yml/release.yml call :paper:shadowJar).
+tasks.named('shadowJar') { finalizedBy tasks.named('vssJar') }
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 25
+}
+

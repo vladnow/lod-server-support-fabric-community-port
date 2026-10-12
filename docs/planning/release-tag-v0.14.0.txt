@@ -1,0 +1,14 @@
+### New Features
+
+- **Optional permission gate.** Servers can now require the `lss.use` and `vss.use` permissions before serving LODs to a player. Off by default, so nothing changes unless you turn it on.
+- **Separate cache per world.** On proxy networks that put several worlds behind one address, your distant terrain no longer mixes between them.
+- **Safer /lss reset.** Reset now checks your Voxy setup before clearing anything and warns you if something looks wrong. Use `/lss reset voxy-force` for unusual setups.
+
+### Bug Fixes
+
+- **NeoForge: LODs now work on LAN worlds.** Opening a world to LAN on the NeoForge build now serves LODs to players who join. Before, the NeoForge build only served them on dedicated servers.
+- **Steadier on Folia servers.** A round of fixes makes LOD serving more reliable on Folia.
+
+### Compatibility
+
+- Mixed client and server versions stay fully compatible in both directions.

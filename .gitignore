@@ -1,0 +1,67 @@
+.gradle/
+build/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Eclipse / jdtls (Java language server) project metadata
+.project
+.classpath
+.settings/
+run/
+out/
+.fabric/
+remappedSrc/
+test-server/
+libs/
+# ... but never inside source trees: shaded-package test stubs (e.g. Moonrise-Fabric's
+# ca/spottedleaf/moonrise/libs/...) legitimately contain a "libs" path segment.
+!**/src/**/libs/
+!**/src/**/libs/**
+logs/
+fabric/config/
+net/
+# ...but never the real-package-name TEST STUBS under a source tree (the bare `net/`
+# above silently dropped fabric/src/test/java/net/caffeinemc/** from a commit once —
+# sodium-options-page-generations-plan.md review; git needs the directory re-included
+# before its files can be).
+!**/src/**/net/
+!**/src/**/net/**
+org/
+research/
+bin/
+
+benchmark-results/
+compress-gate-results/
+benchmark-worlds/
+benchmark-compare-results/
+soak-results/
+soak-worlds/
+
+# Oracle mod (standalone, never committed to main)
+oracle/
+
+# Git worktrees
+.worktrees/
+
+__pycache__/
+profile-results/
+benchmark-compare-results/
+.pid
+
+# Store gate harness output (JFR profiles are huge)
+store-gate-results/
+CLAUDE.local.md
+
+# Tier-3/gametest client cache droppings (the .lss gameDir convention)
+fabric/.lss/
+
+# jdtls/buildship artifacts (a stray add -A once committed these)
+.eclipse/
+
+# Local port artifacts and test evidence
+dist/
+verification/
+.tools/
+README.PORT.md

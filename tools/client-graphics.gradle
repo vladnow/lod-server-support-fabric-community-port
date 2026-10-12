@@ -1,0 +1,10 @@
+gradle.projectsEvaluated {
+    gradle.rootProject.project(':fabric').tasks.matching { it.name == 'runClientGameTest' }.configureEach {
+        jvmArgs '-Dvoxy.geometryBufferSizeOverrideMB=512'
+        doFirst {
+            def opts = new File(workingDir, 'options.txt')
+            opts.parentFile.mkdirs()
+            opts.text = 'graphicsBackend:opengl\nrenderDistance:2\nsimulationDistance:2\nmaxFps:60\nenableVsync:false\n'
+        }
+    }
+}

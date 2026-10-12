@@ -1,0 +1,105 @@
+{
+  "snapshotIntervalSeconds": 5,
+  "joinTimeoutSeconds": 240,
+  "steps": [
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule minecraft:random_tick_speed 0"
+    },
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule minecraft:spawn_mobs false"
+    },
+    {
+      "anchor": 1,
+      "at": 2,
+      "cmd": "gamerule minecraft:mob_griefing false"
+    },
+    {
+      "anchor": 1,
+      "at": 3,
+      "cmd": "gamerule minecraft:fire_spread_radius_around_player 0"
+    },
+    {
+      "anchor": 1,
+      "at": 3,
+      "cmd": "gamerule minecraft:advance_time false"
+    },
+    {
+      "anchor": 1,
+      "at": 4,
+      "cmd": "tp @a 0 150 0"
+    },
+    {
+      "anchor": 1,
+      "at": 65,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 68,
+      "cmd": "forceload add 328 8"
+    },
+    {
+      "anchor": 1,
+      "at": 70,
+      "cmd": "setblock 328 -64 8 minecraft:stone"
+    },
+    {
+      "anchor": 1,
+      "at": 70,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 75,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 80,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 85,
+      "cmd": "forceload remove 328 8"
+    },
+    {
+      "anchor": 1,
+      "at": 85,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 90,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 95,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 100,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 105,
+      "cmd": "save-all"
+    },
+    {
+      "anchor": 1,
+      "at": 110,
+      "cmd": "save-all"
+    }
+  ],
+  "end": {
+    "anchor": 1,
+    "at": 190
+  }
+}

@@ -1,0 +1,23 @@
+name: Fabric 26.3
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@v4
+      - run: chmod +x gradlew
+      - run: ./gradlew :common:test :fabric:build :fabric:runGameTest --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fabric-26.3
+          path: |
+            fabric/build/libs/*.jar
+            common/build/reports/tests/
+            fabric/build/reports/tests/

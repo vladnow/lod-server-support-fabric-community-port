@@ -1,0 +1,12 @@
+accessWidener v2 official
+# Headless section serialization (disk-read serve path, 2026-07-29 profile): the palette
+# histogram that replaces LevelChunkSection's recalcBlockCounts needs the container's
+# palette + storage pair. Vanilla keeps them behind a private volatile field on a private
+# record; Paper's Moonrise patch makes both public, so the Paper twin needs no widening.
+accessible class net/minecraft/world/level/chunk/PalettedContainer$Data
+accessible field net/minecraft/world/level/chunk/PalettedContainer data Lnet/minecraft/world/level/chunk/PalettedContainer$Data;
+
+# 26.3 armor trims use vanilla's paletted texture resolution; reuse its exact key.
+accessible class net/minecraft/client/renderer/entity/layers/EquipmentLayerRenderer$TrimTextureKey
+accessible method net/minecraft/client/renderer/entity/layers/EquipmentLayerRenderer$TrimTextureKey <init> (Lnet/minecraft/world/item/equipment/trim/ArmorTrim;Lnet/minecraft/client/resources/model/EquipmentClientInfo$LayerType;Lnet/minecraft/client/resources/model/EquipmentClientInfo;)V
+accessible method net/minecraft/client/renderer/entity/layers/EquipmentLayerRenderer$TrimTextureKey getOrPrepareTexture (Lnet/minecraft/client/resources/palette/PalettedTextureManager;)Lnet/minecraft/client/resources/palette/PalettedTextureManager$Handle;

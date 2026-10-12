@@ -1,0 +1,21 @@
+package dev.vox.lss.config.menu;
+
+/**
+ * Whether an option is built into the page at all (as opposed to greyed — that is
+ * {@link OptionSpec#enabledBy()}). Enumerable for the same reason as
+ * {@link Tooltip.Condition}: tests can assert exactly which options a context hides.
+ */
+public enum Visibility {
+    ALWAYS,
+    /** Only where this loader's tree actually renders far players — the renderer-only
+     *  options (show / name tags / full bright / render limit) are hidden on NeoForge v1, whose render
+     *  path is a stub; a shown-but-inert toggle would be a lie where the user is looking. */
+    RENDER_AVAILABLE;
+
+    public boolean test(MenuContext ctx) {
+        return switch (this) {
+            case ALWAYS -> true;
+            case RENDER_AVAILABLE -> ctx.farPlayerRenderAvailable();
+        };
+    }
+}

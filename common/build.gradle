@@ -1,0 +1,127 @@
+plugins {
+    id 'java-library'
+    id 'java-test-fixtures'
+    id 'com.gradleup.shadow' version '9.4.2'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+repositories {
+    mavenCentral()
+}
+
+configurations {
+    yamlEngine {
+        canBeConsumed = false
+        transitive = false
+    }
+    xzEngine {
+        canBeConsumed = false
+        transitive = false
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+}
+
+dependencies {
+    api 'org.slf4j:slf4j-api:2.0.18'
+    compileOnly 'org.snakeyaml:snakeyaml-engine:3.1.1'
+    yamlEngine 'org.snakeyaml:snakeyaml-engine:3.1.1'
+    compileOnly 'it.unimi.dsi:fastutil:8.5.18'
+    // Provided at runtime by both platforms (Minecraft bundles GSON); compileOnly keeps it
+    // out of the Paper shadow jar and the Fabric jar-in-jar, same pattern as fastutil.
+    compileOnly 'com.google.code.gson:gson:2.13.2'
+    // SQLite is compiled only by the private bridge and packaged as an opaque
+    // resource (gradle/sqlite-runtime.gradle). Platforms still provide zstd.
+    compileOnly 'com.github.luben:zstd-jni:1.5.7-3'
+    compileOnly 'org.tukaani:xz:1.10'
+    xzEngine 'org.tukaani:xz:1.10'
+}
+
+// Captured DH frames are shared by MC-independent and loader conversion tests.
+tasks.named('processTestFixturesResources') {
+    from('src/test/resources') { include 'dh-corpus/**' }
+}
+
+// P6a: MC/loader-free tests execute on Java 21 on every support line.
+dependencies {
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testImplementation 'org.snakeyaml:snakeyaml-engine:3.1.1'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testImplementation 'it.unimi.dsi:fastutil:8.5.18'
+    testImplementation 'com.google.code.gson:gson:2.13.2'
+    testImplementation 'com.github.luben:zstd-jni:1.5.7-3'
+    testImplementation 'org.tukaani:xz:1.10'
+}
+
+// One relocated parser copy travels with common, whether nested by Fabric or
+// flattened into Paper/NeoForge. Never resolve an ambient server YAML implementation.
+tasks.named('jar') { archiveClassifier = 'plain' }
+tasks.named('shadowJar') {
+    archiveClassifier = ''
+    configurations = [project.configurations.yamlEngine, project.configurations.xzEngine]
+    relocate 'org.snakeyaml.engine', 'dev.vox.lss.internal.yaml'
+    relocate 'org.tukaani.xz', 'dev.vox.lss.internal.xz'
+    exclude 'module-info.class', 'META-INF/versions/**/module-info.class'
+    exclude 'META-INF/*.SF', 'META-INF/*.RSA', 'META-INF/*.DSA'
+    // Parser license/notice are tracked in common's META-INF/licenses resources.
+}
+configurations.runtimeElements.outgoing.artifacts.clear()
+artifacts { runtimeElements tasks.named('shadowJar') }
+tasks.named('assemble') { dependsOn tasks.named('shadowJar') }
+test {
+    useJUnitPlatform()
+    doFirst {
+        def forbidden = configurations.testRuntimeClasspath.incoming.resolutionResult.allComponents.findAll { component ->
+            def id = component.id
+            (id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier
+                && (id.group.startsWith('net.minecraft') || id.group.startsWith('net.fabricmc')
+                    || id.group.startsWith('net.neoforged')))
+                || (id instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier
+                    && id.projectPath in [':fabric', ':paper', ':neoforge'])
+        }
+        if (!forbidden.empty) throw new GradleException("common:test must remain MC/loader-free: ${forbidden*.id}")
+    }
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    // Preserve moved tests' path lookup and corpus provenance without a Fabric dependency.
+    workingDir rootProject.file('fabric')
+    inputs.dir(rootProject.file('fabric/src/test/resources/nbt-corpus'))
+        .withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.dir('src/main/java').withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
+// Shared settings-file helper: no Minecraft launch or loader classpath is needed.
+configurations {
+    settingsCliRuntime {
+        canBeConsumed = false
+        transitive = false
+    }
+}
+dependencies {
+    settingsCliRuntime 'org.snakeyaml:snakeyaml-engine:3.1.1'
+    settingsCliRuntime 'com.google.code.gson:gson:2.13.2'
+}
+tasks.register('settingsCliClasspath') {
+    dependsOn tasks.named('classes')
+    def target = layout.buildDirectory.file('settings-cli/classpath.txt')
+    outputs.file(target)
+    inputs.files(sourceSets.main.output, configurations.settingsCliRuntime)
+    doLast {
+        def output = target.get().asFile
+        output.parentFile.mkdirs()
+        output.text = (sourceSets.main.output.files + configurations.settingsCliRuntime.files)
+            .collect { it.absolutePath }.join(File.pathSeparator) + '\n'
+    }
+}
+tasks.register('settingsCli', JavaExec) {
+    dependsOn tasks.named('classes')
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    classpath = sourceSets.main.output + configurations.settingsCliRuntime
+    mainClass = 'dev.vox.lss.common.config.SettingsCli'
+    if (project.hasProperty('settingsArgs')) args project.property('settingsArgs').split('\\s+')
+}
+
+apply from: rootProject.file('gradle/sqlite-runtime.gradle')

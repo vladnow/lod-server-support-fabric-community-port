@@ -1,0 +1,541 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+// CI builds carry the full version in the filename (lod-server-support-fabric-0.4.0+26.1.2.jar),
+// derived from mod_version (overridden from the tag by release.yml) + minecraft_version.
+// Local dev builds keep the stable unversioned name so run configs and scripts never chase it.
+def ciArchiveVersion = project.mod_version.toString()
+tasks.withType(AbstractArchiveTask).configureEach {
+    archiveVersion = ciArchiveVersion
+}
+
+repositories {
+    mavenCentral()
+    exclusiveContent {
+        forRepository {
+            maven {
+                name = "Modrinth"
+                url = "https://api.modrinth.com/maven"
+            }
+        }
+        filter {
+            includeGroup "maven.modrinth"
+        }
+    }
+}
+
+// LOD store engine/codec deps, nested into the release jar as native-stripped copies.
+configurations {
+    storeDeps
+}
+
+configurations {
+    // sodium-options-page-generations-plan.md §4 — see the dependencies' comments.
+    sodiumLegacyGolden {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+    sodiumModernGolden {
+        canBeConsumed = false
+        canBeResolved = true
+        transitive = false
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+    testImplementation "net.fabricmc:fabric-loader-junit:${project.loader_version}"
+    testImplementation 'org.mockito:mockito-core:5.20.0'
+    testImplementation 'org.objenesis:objenesis:3.3'
+    // LOD-store Phase 0 experiment deps (docs/planning/lod-store-implementation-plan.md):
+    // the codec/schema decision tool (LodStoreExperimentTool, gated on
+    // -Plss.store.experiment.regionDir) measures decompress throughput + SQLite page-shape
+    // arms on the real benchmark corpus. TEST classpath only — zero packaging risk; the
+    // shipping engine dependency is a separate, deliberate step (plan §3).
+    testImplementation "com.github.luben:zstd-jni:1.5.7-3"
+    testImplementation "org.lz4:lz4-java:1.8.1"
+    implementation project(':common')
+    include project(':common')
+    // zstd keeps its native-stripped nested mod and dev runtime. SQLite comes
+    // exclusively from common's private capsule, including development runs.
+    storeDeps "com.github.luben:zstd-jni:1.5.7-3"
+    localRuntime "com.github.luben:zstd-jni:1.5.7-3"
+    compileOnly "maven.modrinth:sodium:${sodium_version}"
+    compileOnly "maven.modrinth:modmenu:${modmenu_version}"
+    // Optional local verification profile. These dependencies are never nested in releases.
+    if (findProperty('port.voxyJar') != null) {
+        localRuntime files(findProperty('port.voxyJar'))
+        localRuntime "maven.modrinth:sodium:${sodium_version}"
+        localRuntime "maven.modrinth:modmenu:${modmenu_version}"
+    }
+    // The legacy (0.6/0.7) Sodium options surface SodiumLegacySurfaceResolvesTest checks
+    // LegacySodiumPage.SURFACE against by NAME + ARITY (sodium-options-page-generations-
+    // plan.md §4): a PLAIN configuration, resolved outside loom and never on any compile
+    // or test classpath (the test opens the jar as a zip — a Sodium class on the T1
+    // classpath would be shadowed by the stub package anyway). Offline or unresolvable
+    // = the test skips itself (see the test task below).
+    sodiumLegacyGolden "maven.modrinth:sodium:${sodium_legacy_golden}"
+    // The 0.8+ INTERNAL deep-link surface SodiumConfigScreens.MODERN_SURFACE binds by
+    // name (ConfigManager/Config/ModOptions/VideoSettingsScreen) — checked the same way
+    // against the line's own compile artifact (this configuration exists only where the
+    // line pins one; a 0.7-only line leaves it unresolvable and the test skips).
+    sodiumModernGolden "maven.modrinth:sodium:${sodium_version}"
+    // Compat validation arm: -Pbenchmark.moonrise=true puts Moonrise on the dev runtime
+    // (the same Modrinth version issue #69 was reported against), so the soak harness can
+    // drive the full dirty pipeline — the SerializableChunkData.copyOf hook, broadcast,
+    // client re-request — against Moonrise's replacement chunk system
+    // (SOAK_EXTRA_GRADLE_ARGS="-Pbenchmark.moonrise=true" ./scripts/soak.sh dirty-broadcast).
+    // Runtime-only: release jars and normal builds are unaffected.
+    if ((findProperty('benchmark.moonrise') ?: 'false').toString() == 'true') {
+        localRuntime "maven.modrinth:moonrise-opt:${moonrise_modrinth_version}"
+    }
+    // Same arm for C2ME (the Modrinth version test-server.sh installs), doing double duty:
+    // the disk-read profile measures the chunk-IO-overhaul fallback path (adaptive read
+    // throttle) against the vanilla IOWorker background-priority path, and the copyOf dirty
+    // hook is validated through C2ME's rewritten save paths — the old ChunkMap.save hook
+    // silently never fired there. Runtime-only: release jars and normal builds are unaffected.
+    if ((findProperty('benchmark.c2me') ?: 'false').toString() == 'true') {
+        localRuntime "maven.modrinth:c2me-fabric:${c2me_modrinth_version}"
+    }
+}
+
+test {
+    useJUnitPlatform()
+    // SodiumLegacySurfaceResolvesTest's inputs: the legacy (0.6/0.7) and modern (0.8+)
+    // Sodium jars (gradle.properties sodium_legacy_golden / sodium_version). LENIENT
+    // artifact views resolve at execution and simply yield nothing offline, so a
+    // disconnected box still runs Tier 1 (the test skips with an assumption — but under
+    // CI=true it FAILS instead: a mistyped coordinate must not void the golden arm
+    // silently). No Project reference is captured in the task action.
+    def legacyGolden = configurations.sodiumLegacyGolden.incoming.artifactView { lenient = true }.files
+    def modernGolden = configurations.sodiumModernGolden.incoming.artifactView { lenient = true }.files
+    inputs.property "sodium_legacy_golden", project.sodium_legacy_golden
+    inputs.property "sodium_version", project.sodium_version
+    inputs.files(legacyGolden).optional()
+    inputs.files(modernGolden).optional()
+    doFirst {
+        systemProperty 'lss.sodiumLegacyGoldenJar', legacyGolden.find { it.name.endsWith('.jar') }?.absolutePath ?: ''
+        systemProperty 'lss.sodiumModernGoldenJar', modernGolden.find { it.name.endsWith('.jar') }?.absolutePath ?: ''
+        systemProperty 'lss.sodiumModernGoldenExpected', 'true'
+    }
+    // GameTestEntrypointContractTest reads these at runtime (repo-walk); without declaring
+    // them as inputs, adding a gametest class or editing the entrypoint list leaves the
+    // task UP-TO-DATE locally and the contract never re-checks.
+    inputs.dir("src/gametest/java").withPathSensitivity(PathSensitivity.RELATIVE)
+    inputs.file("src/gametest/resources/fabric.mod.json").withPathSensitivity(PathSensitivity.RELATIVE)
+    // LOD-store Phase 0 experiment pass-through (inert unless -Plss.store.experiment.regionDir
+    // is given; the tool test skips itself without it). Extra heap only when engaged.
+    ['lss.store.experiment.regionDir', 'lss.store.experiment.out',
+     'lss.store.experiment.maxColumns', 'lss.store.experiment.warmup',
+     // C6 cross-line corpus capture (XverLiveCorpusCaptureTool; self-skipping without it)
+     'lss.xver.captureRegionDir'].each { p ->
+        if (findProperty(p) != null) systemProperty p, findProperty(p).toString()
+    }
+    if (findProperty('lss.store.experiment.regionDir') != null) {
+        maxHeapSize = '3g'
+    }
+}
+
+// Stage N-1a (neoforge-support-plan.md §2): loader-neutral MC logic lives in the
+// xplat/ shared SOURCE SET (not a Gradle project — it has MC deps, so each loader
+// module compiles it against its own toolchain; packages unchanged).
+sourceSets {
+    main {
+        java {
+            srcDir '../xplat/src/main/java'
+        }
+    }
+}
+
+// LINE DATA (port-isolation-round-2-plan.md R2-1): Tier 3 (client gametests) per
+// line — true on 26.x/1.21.11, false on 1.21.1 (no fabric-client-gametest-api in
+// that line's fabric-api; pre-authorized-cuts.md). This boolean is the ONLY build
+// edit a Tier-3 cut needs: it flips the loom wiring, registers a poison-pill
+// runClientGameTest stub (so every `-x runClientGameTest` across the machinery
+// stays line-invariant and a direct invocation reds with an explanation), excludes
+// the client gametest class from compilation, and filters its entrypoint out of
+// the gametest fabric.mod.json (a compile-exclude without the resource edit breaks
+// Tier 2 at entrypoint resolution). The source tree and source fabric.mod.json
+// stay IDENTICAL across lines — GameTestEntrypointContractTest compares source to
+// source, so it is line-neutral by construction.
+def tier3 = true
+
+fabricApi {
+    configureTests {
+        createSourceSet = true
+        modId = "lss-test"
+        enableGameTests = true
+        enableClientGameTests = tier3
+        eula = true
+    }
+}
+
+if (!tier3) {
+    tasks.register('runClientGameTest') {
+        group = 'verification'
+        description = 'Poison pill: Tier 3 is cut on this line (pre-authorized-cuts.md).'
+        doFirst {
+            throw new GradleException('Tier 3 (client gametests) is CUT on this line — '
+                    + 'see docs/planning/pre-authorized-cuts.md. -x runClientGameTest is '
+                    + 'a no-op here by design; do not invoke the task directly.')
+        }
+    }
+    afterEvaluate {
+        sourceSets.gametest.java.exclude 'dev/vox/lss/test/LSSClientGameTests.java'
+        tasks.named('processGametestResources') {
+            doLast {
+                def f = new File(it.destinationDir, 'fabric.mod.json')
+                def json = new groovy.json.JsonSlurper().parse(f)
+                json.entrypoints.remove('fabric-client-gametest')
+                f.text = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(json))
+            }
+        }
+    }
+}
+
+loom {
+    accessWidenerPath = file("src/main/resources/lss.accesswidener")
+    runs {
+        register("benchmarkServer") {
+            server()
+            runDir "build/run/benchmark-server"
+            vmArg "-Dlss.benchmark=true"
+            vmArg "-Dlss.benchmark.duration=${findProperty('benchmark.duration') ?: '60'}"
+            vmArg "-XX:StartFlightRecording=filename=server-benchmark.jfr,settings=profile,disk=true"
+            programArg "--nogui"
+        }
+        register("benchmarkClient") {
+            client()
+            runDir "build/run/benchmark-client"
+            vmArg "-Dlss.benchmark=true"
+            // C6 legacy-dialect benchmark arm (XVER §12 translation cost): same lever
+            // as the soak client — "19" announces protocol 19, exercising the server's
+            // per-recipient egress translation on every served column.
+            vmArg "-Dlss.soak.dialect=${findProperty('soak.dialect') ?: ''}"
+            vmArg "-XX:StartFlightRecording=filename=client-benchmark.jfr,settings=profile,disk=true"
+            programArg "--quickPlayMultiplayer"
+            programArg "localhost:25565"
+        }
+        // Soak harness runs (scripts/soak.sh) — no JFR: profiling overhead would skew the
+        // long-run behavior the soak observes
+        register("soakServer") {
+            server()
+            runDir "build/run/soak-server"
+            vmArg "-Dlss.soak.scenario=${findProperty('soak.scenario') ?: ''}"
+            vmArg "-Dlss.soak.dirtydebug=${findProperty('soak.dirtydebug') ?: 'false'}"
+            // Server-side probe hashes (probe_hashes in server.jsonl — the store
+            // byte-parity gate): armed per scenario via soak.sh SERVER_EXTRA_ARGS.
+            vmArg "-Dlss.soak.probes=${findProperty('soak.probes') ?: ''}"
+            // Store-migration overlap hold (pre-D3 review L3-1): the gate's phase 2
+            // holds the walk so the join provably serves from 19-rows.
+            vmArg "-Dlss.soak.migrationHoldSeconds=${findProperty('soak.migrationHoldSeconds') ?: '0'}"
+            programArg "--nogui"
+        }
+        register("soakClient") {
+            client()
+            runDir "build/run/soak-client"
+            vmArg "-Dlss.soak=true"
+            // Stable identity: the dev client otherwise randomizes its offline username per
+            // launch, so a rejoin scenario's run 2 is a DIFFERENT player — fresh playerdata,
+            // overworld spawn instead of restoring into the dimension run 1 was kicked in.
+            programArg "--username"
+            programArg "SoakPlayer"
+            // Per-scenario client instrumentation (soak.sh passes these as -P properties):
+            // probes = per-position timestamp probes "x:z,..."; clientActionAt = one
+            // scripted client-side action "SECONDS:ACTION" (e.g. "60:clearcache");
+            // dialect = legacy-client emulation (C2 — "19" announces protocol 19 and
+            // skips the v20 decode translation, exercising the server's egress rungs)
+            vmArg "-Dlss.soak.probes=${findProperty('soak.probes') ?: ''}"
+            vmArg "-Dlss.soak.clientActionAt=${findProperty('soak.clientActionAt') ?: ''}"
+            vmArg "-Dlss.soak.dialect=${findProperty('soak.dialect') ?: ''}"
+            // Region summaries (region-summary-sync-plan.md §6): -Dlss.soak gates the
+            // client OFF requesting so no baseline shifts; the summary scenarios opt
+            // back in with -Psoak.summary=true.
+            vmArg "-Dlss.soak.summary=${findProperty('soak.summary') ?: 'false'}"
+            programArg "--quickPlayMultiplayer"
+            // Overridable so the same task doubles as the FARP live-gate dummy against
+            // a test-server.sh instance (harness runs keep the default and are
+            // byte-unchanged): -Psoak.server=localhost:25564
+            programArg "${findProperty('soak.server') ?: 'localhost:25565'}"
+        }
+    }
+}
+
+afterEvaluate {
+    loom.runs.configureEach {
+        if (name.toLowerCase().contains("gametest")) {
+            vmArg "-Dlss.test.integratedServer=true"
+        }
+        if (name.toLowerCase().contains("clientgametest")) {
+            vmArg "-Dfabric.client.gametest.disableNetworkSynchronizer=true"
+        }
+    }
+    // The gametest tiers measure the store-OFF pipeline (their source-attribution and
+    // parity pins were calibrated that way, same as the soak/benchmark stagings) —
+    // since lodStore defaults to "on" (2026-08-08 rework), pin it off in the gametest
+    // run dirs explicitly. Overwritten every run: the run dirs persist, and a stale
+    // hand-edit here would silently change what the tiers measure.
+    loom.runs.matching { it.name.toLowerCase().contains("gametest") }.configureEach { runCfg ->
+        def taskName = "run" + runCfg.name.capitalize()
+        def dir = runCfg.runDir
+        tasks.matching { it.name == taskName }.configureEach { task ->
+            task.doFirst {
+                def cfgDir = new File(project.file(dir ?: "run"), "config")
+                cfgDir.mkdirs()
+                // maxConcurrentDiskReads: a large no-op (>= any pool) — the parity and
+                // fault gametests expect every submitted read to resolve; a surprise
+                // gate drop would flake them (disk-read-concurrency-gate-plan.md).
+                new File(cfgDir, "lss-server-config.yaml").text =
+                        'config_version: 1\nstorage:\n  disk:\n    max_concurrent_reads: 64\n  lod_store:\n    enabled: false\n    backfill:\n      enabled: false\n'
+            }
+        }
+    }
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "minecraft_dependency", project.minecraft_dependency
+    inputs.property "fabric_api_dependency", project.fabric_api_dependency
+    inputs.property "suggests_sodium", project.suggests_sodium
+    inputs.property "suggests_voxy", project.suggests_voxy
+
+    filesMatching("fabric.mod.json") {
+        // V-1/P3 (+ the G back-flow): the MC and fabric-api depends ranges are
+        // per-line DATA (gradle.properties) — a support cut edits the data, never
+        // this resource.
+        expand "version": inputs.properties.version,
+               "minecraft_dependency": inputs.properties.minecraft_dependency,
+               "fabric_api_dependency": inputs.properties.fabric_api_dependency,
+               "suggests_sodium": inputs.properties.suggests_sodium,
+               "suggests_voxy": inputs.properties.suggests_voxy
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 25
+}
+
+// ---- LOD store nested dependency jars (plan §3 packaging) -----------------------------
+//
+// zstd-jni retains its native-stripped nested mod (Linux/Windows/macOS x64/arm64).
+// SQLite's independent capsule and eight-platform matrix belong to common.
+// Loom merges common's include-generated entry into fabric.mod.json's jars array.
+def storeDepSlimDir = layout.buildDirectory.dir('store-jars')
+def storeNativeKeep = [
+    'linux/amd64/', 'linux/aarch64/', 'win/amd64/', 'win/aarch64/',
+    'darwin/x86_64/', 'darwin/aarch64/',
+]
+def storeNativeRoots = ['linux/', 'win/', 'darwin/', 'freebsd/', 'aix/']
+
+tasks.register('slimStoreDepJars') {
+    description = 'Repackages the LOD-store deps as native-stripped nested mod jars.'
+    inputs.files(configurations.storeDeps)
+    // The keep/root lists are task inputs too — without this, editing them leaves the
+    // cached slim jars stale until a clean (Phase 0 correctness-review F3).
+    inputs.property('storeNativeKeep', storeNativeKeep)
+    inputs.property('storeNativeRoots', storeNativeRoots)
+    outputs.dir(storeDepSlimDir)
+    doLast {
+        def outDir = storeDepSlimDir.get().asFile
+        outDir.deleteDir()
+        outDir.mkdirs()
+        configurations.storeDeps.resolvedConfiguration.resolvedArtifacts.each { art ->
+            def name = art.name                        // zstd-jni
+            def version = art.moduleVersion.id.version
+            def modId = 'lss-' + name.replaceAll('[^a-z0-9-]', '-')
+            def outFile = new File(outDir, "${name}-slim.jar")
+            def zf = new ZipFile(art.file)
+            try {
+                new ZipOutputStream(new FileOutputStream(outFile)).withCloseable { zos ->
+                    def entries = zf.entries()
+                    while (entries.hasMoreElements()) {
+                        def e = entries.nextElement()
+                        def isNative = storeNativeRoots.any { e.name.startsWith(it) }
+                        if (isNative && !storeNativeKeep.any { e.name.startsWith(it) }) {
+                            continue
+                        }
+                        // Directory entries for stripped dirs are harmless; copy all.
+                        def ne = new ZipEntry(e.name)
+                        // Two seconds past the ZIP epoch avoids the JDK minimum-date sentinel
+                        // that emits a timezone-dependent extended timestamp.
+                        ne.setTimeLocal(java.time.LocalDateTime.of(1980, 1, 1, 0, 0, 2))
+                        ne.method = e.method
+                        if (e.method == ZipEntry.STORED) {
+                            ne.size = e.size
+                            ne.compressedSize = e.compressedSize
+                            ne.crc = e.crc
+                        }
+                        zos.putNextEntry(ne)
+                        zf.getInputStream(e).withCloseable { is -> zos << is }
+                        zos.closeEntry()
+                    }
+                    def descriptorEntry = new ZipEntry('fabric.mod.json')
+                    descriptorEntry.setTimeLocal(java.time.LocalDateTime.of(1980, 1, 1, 0, 0, 2))
+                    zos.putNextEntry(descriptorEntry)
+                    zos.write(groovy.json.JsonOutput.toJson([
+                            schemaVersion: 1, id: modId, version: version,
+                            name: "${name} (LSS LOD store)".toString(),
+                    ]).getBytes('UTF-8'))
+                    zos.closeEntry()
+                }
+            } finally {
+                zf.close()
+            }
+        }
+    }
+}
+
+jar {
+    inputs.property "archivesName", project.base.archivesName
+
+    // The benchmark harness is a dev-only tool (-Dlss.benchmark); keep it out of release
+    // jars. Dev/benchmark runs execute from class directories, so they are unaffected,
+    // and BenchmarkBridge no-ops when the classes are absent.
+    exclude 'dev/vox/lss/benchmark/**'
+
+    dependsOn slimStoreDepJars
+    from(storeDepSlimDir) {
+        into 'META-INF/jars'
+    }
+
+    from(rootProject.file("LICENSE")) {
+        rename { "${it}_${inputs.properties.archivesName}" }
+    }
+    // zstd-jni's BSD-2 notice must accompany the natives we redistribute (4-agent
+    // round R4 — upstream's slim jar carries no license text of its own).
+    from(rootProject.file("THIRD-PARTY-NOTICES"))
+}
+
+// ---- Voxy Server Side (VSS) branded variant -------------------------------------------
+//
+// Same mod, second Modrinth project (voxy-server-side). Produced by BYTE-COPYING the built,
+// remapped LSS jar and rewriting only the fabric.mod.json branding fields + the
+// lss-brand.properties display resource (which drives the LOCAL /vss command + all VSS
+// display text via common/Brand) — every class, mixin, refmap, the
+// Loom-injected `jars` field, and the nested META-INF/jars/common jar are copied verbatim.
+// This guarantees the VSS jar is wire-identical to the LSS jar (same protocol, channels, mod
+// id `lss`, config paths — the nested common jar is byte-identical, release_check.py pins the
+// SHA), so an LSS server and a VSS client (and every other combination) are fully compatible.
+// The identity fields (id / entrypoints / mixins / depends / jars) are DELIBERATELY untouched
+// — release_check.py pins `id == lss`. See docs/planning/ci-dual-publish.md.
+import java.util.zip.ZipFile
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+def vssFabricJarName = "voxy-server-side-fabric" + (ciArchiveVersion ? "-${ciArchiveVersion}" : "") + ".jar"
+def lssFabricJarName = "lod-server-support-fabric" + (ciArchiveVersion ? "-${ciArchiveVersion}" : "") + ".jar"
+
+tasks.register('vssJar') {
+    description = 'Repackages the LSS Fabric jar under the Voxy Server Side branding.'
+    // This Loom version (1.17) has no separate remapJar — the `jar` task produces the final
+    // remapped release jar directly (with the nested common JiJ + Fabric-Mapping-Namespace).
+    // String dependency so it resolves at graph-build time, not config time.
+    dependsOn 'jar'
+    def iconFile = rootProject.file('branding/vss/icon.png')
+    def srcJar = layout.buildDirectory.file("libs/${lssFabricJarName}")
+    def outFile = layout.buildDirectory.file("libs/${vssFabricJarName}")
+    inputs.file(srcJar)
+    inputs.file(iconFile)
+    outputs.file(outFile)
+    doLast {
+        def src = srcJar.get().asFile
+        def out = outFile.get().asFile
+        out.parentFile.mkdirs()
+        def zf = new ZipFile(src)
+        try {
+            new ZipOutputStream(new FileOutputStream(out)).withCloseable { zos ->
+                def entries = zf.entries()
+                while (entries.hasMoreElements()) {
+                    def e = entries.nextElement()
+                    if (e.name == 'fabric.mod.json') {
+                        // Read the BUILT descriptor (Loom already injected `version` + `jars`);
+                        // change ONLY the branding fields, preserving everything else.
+                        // Field values folded from XANTHA's v0.10.0 release patch (2026-08-13);
+                        // the dedicated VSS icon is RESTORED (branding/vss/icon.png, injected
+                        // below as assets/lss/icon-vss.png).
+                        def json = new groovy.json.JsonSlurper().parse(zf.getInputStream(e))
+                        json.name = 'Voxy Server Side Community Port'
+                        json.description = 'Unofficial Fabric 26.3 port for distant Voxy terrain on servers'
+                        json.authors = ['Xantha', 'VoX']
+                        json.icon = 'assets/lss/icon-vss.png'
+                        if (json.contact instanceof Map) {
+                            json.contact.homepage = 'https://modrinth.com/plugin/voxy-server-side'
+                        }
+                        byte[] bytes = groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(json)).getBytes('UTF-8')
+                        def ne = new ZipEntry('fabric.mod.json')
+                        zos.putNextEntry(ne)
+                        zos.write(bytes)
+                        zos.closeEntry()
+                    } else if (e.name == 'lss-brand.properties') {
+                        // Runtime display branding (Brand.java reads this at startup). Rewrite
+                        // the DISPLAY values only — the mod id, channels, protocol and payloads
+                        // are untouched, so LSS and VSS stay wire-compatible. Command literals
+                        // here are LOCAL (client /vss, server /vsslod), never on the wire.
+                        def props = 'shortName=VSS\ndisplayName=Voxy Server Side Community Port\nclientCommand=vss\nserverCommand=vsslod\n'
+                        def ne = new ZipEntry('lss-brand.properties')
+                        zos.putNextEntry(ne)
+                        zos.write(props.getBytes('UTF-8'))
+                        zos.closeEntry()
+                    } else if (e.name.startsWith('assets/lss/lang/') && e.name.endsWith('.json')) {
+                        // Display-string rebrand in EVERY lang file's VALUES only (keys stay
+                        // lss.* — they are addressed by the untouched mod id). Without this
+                        // the VSS Sodium pages read "LOD Server Support"/"LSS" mid-sentence
+                        // (path-prefix match, not the en_us literal, so added locales —
+                        // zh_cn/zh_tw — rebrand too; Java's ASCII \b is CJK-safe here).
+                        def lang = new groovy.json.JsonSlurper().parse(zf.getInputStream(e))
+                        def rebranded = lang.collectEntries { k, v ->
+                            [k, v.toString()
+                                    .replace('LOD Server Support', 'Voxy Server Side')
+                                    // Word-boundary: never corrupt 'LSS' inside a longer
+                                    // token (review-wave V-M2).
+                                    .replaceAll(/\bLSS\b/, 'VSS')]
+                        }
+                        byte[] lb = groovy.json.JsonOutput.prettyPrint(
+                                groovy.json.JsonOutput.toJson(rebranded)).getBytes('UTF-8')
+                        def ne = new ZipEntry(e.name)
+                        zos.putNextEntry(ne)
+                        zos.write(lb)
+                        zos.closeEntry()
+                    } else {
+                        // Byte-preserving copy: keep the original compression method, and for
+                        // STORED entries (e.g. the nested common jar) carry size/crc so the
+                        // nested Jar-in-Jar is bit-for-bit intact.
+                        def ne = new ZipEntry(e.name)
+                        ne.method = e.method
+                        if (e.method == ZipEntry.STORED) {
+                            ne.size = e.size
+                            ne.compressedSize = e.compressedSize
+                            ne.crc = e.crc
+                        }
+                        zos.putNextEntry(ne)
+                        zf.getInputStream(e).withCloseable { is -> zos << is }
+                        zos.closeEntry()
+                    }
+                }
+                // The restored VSS icon rides as a NEW entry beside the LSS icon (the
+                // descriptor above points at it); nothing else in the jar changes.
+                zos.putNextEntry(new ZipEntry('assets/lss/icon-vss.png'))
+                zos.write(iconFile.bytes)
+                zos.closeEntry()
+            }
+        } finally {
+            zf.close()
+        }
+    }
+}
+
+tasks.named('build') { dependsOn 'vssJar' }
+
+// Shared pure test seam; never part of shipping artifacts.
+dependencies { testImplementation(testFixtures(project(':common'))) }

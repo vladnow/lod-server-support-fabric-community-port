@@ -1,0 +1,41 @@
+modLoader="javafml"
+loaderVersion="[4,)"
+license="MIT"
+issueTrackerURL="https://github.com/VoX/lod-server-support/issues"
+
+[[mods]]
+modId="lss"
+version="${mod_version}"
+displayName="LOD Server Support"
+authors="VoX"
+logoFile="assets/lss/icon.png"
+description='''Voxy multiplayer support (unofficial). Enables players with Voxy to see fully rendered terrain out to hundreds of chunks on multiplayer servers without needing to explore the world first. Server-side works with any LSS/VSS client; the client half needs a community Voxy build for NeoForge.'''
+
+[[mixins]]
+config="lss.neoforge.mixins.json"
+
+[[mixins]]
+config="lss-sodium-legacy.mixins.json"
+
+[[dependencies.lss]]
+    modId="neoforge"
+    type="required"
+    # DERIVED (R2-6): the loader floor is neoforge_version's first two components
+    # (26.2.0.59 -> [26.2,)) — the hand row churned on all three v0.11 ports.
+    versionRange="[${neoforge_floor},)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.lss]]
+    modId="minecraft"
+    type="required"
+    versionRange="[${minecraft_version}]"
+    ordering="NONE"
+    side="BOTH"
+
+# Sodium 0.8+ options page (sodium-options-page-generations-plan.md, NeoForge
+# amendment): sodium-neoforge's ConfigLoaderForge reads this property from every
+# mod and instantiates the named ConfigEntryPoint — the same key Fabric declares
+# as an entrypoint. Harmless when Sodium is absent or pre-0.8.
+[modproperties.lss]
+"sodium:config_api_user"="dev.vox.lss.config.LSSConfigMenu"

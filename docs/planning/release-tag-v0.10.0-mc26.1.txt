@@ -1,0 +1,44 @@
+### New Features
+
+- **Cross-version LOD serving** — a client and server on different Minecraft
+  versions can now exchange LODs: any two of 26.2, 26.1, and 1.21.11 work
+  together once both sides run v0.10.0. Older LSS clients (v0.4.x and newer)
+  keep working through the built-in compatibility layers.
+- **ViaVersion safety guard** — a client joining through ViaVersion with an
+  older LSS installed is declined cleanly instead of being sent LODs it
+  cannot decode.
+
+### Performance
+
+- **LOD serving interferes less with normal chunk loading** — LOD disk reads
+  now stay almost entirely off Minecraft's own chunk-loading path (Fabric),
+  and chunk parsing is leaner.
+- **The freshness cache tracks far more terrain in the same memory** — large
+  LOD distances no longer thrash it; existing caches upgrade automatically.
+
+### Configuration
+
+- **Bigger defaults** — LOD distance defaults to 512 chunks (was 256), and
+  generation concurrency to 40 server-wide / 40 per player.
+- **Bandwidth caps are now set in MiB/s** — `mbPerSecondLimitPerPlayer`
+  (default `25.0`) and `mbPerSecondLimitGlobal` (default `75.0`) replace the
+  old byte-denominated keys; decimals like `12.5` work, and old config files
+  keep working unchanged.
+- **The LOD store is on for new servers** — freshly generated configs enable
+  it (`lodStore: "on"`): repeat requests are served from a per-world store for
+  a fraction of the work, at the cost of roughly doubling the world folder
+  once warmed (`lodStoreMaxMB` bounds it). Upgrading never changes your disk
+  footprint: an existing config without the key keeps the store off until you
+  enable it.
+- **A slimmer generated config** — rarely-needed expert switches no longer
+  appear in generated files, but remain honored if you add them.
+
+### Notes
+
+- An existing LOD store upgrades in place on first boot via a background pass
+  — no rebuild, and serving continues meanwhile.
+- Folia support remains **experimental** (single-player validation only).
+- This is the MC 26.1 build of the v0.10.0 tri-release: all three lines (26.2,
+  26.1, 1.21.11) ship the same mod at the same feature level, differing only in
+  Minecraft bindings. Cross-version LOD serving works between any two of them
+  once both sides run v0.10.0.
